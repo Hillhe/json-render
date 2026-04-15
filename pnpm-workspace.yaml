@@ -1,6 +1,13 @@
 packages:
-  - "apps/*"
-  - "examples/*"
-  - "examples/stripe-app/*"
-  - "packages/*"
-  - "tests/*"
+  - apps/*
+  - examples/*
+  - examples/stripe-app/*
+  - packages/*
+  - tests/*
+
+onlyBuiltDependencies:
+  - '@mongodb-js/zstd'
+  - esbuild
+  - msw
+  - node-liblzma
+  - sharp

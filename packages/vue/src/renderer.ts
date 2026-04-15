@@ -3,11 +3,13 @@ import {
   defineComponent,
   h,
   inject,
+  isVNode,
   onErrorCaptured,
   provide,
   ref,
   watch,
   type Component,
+  type ComponentPublicInstance,
   type ComputedRef,
   type PropType,
   type VNode,
@@ -181,16 +183,25 @@ async function resolveAndExecuteBindings(
 // ---------------------------------------------------------------------------
 
 interface ElementRendererInternalProps {
+  elementKey: string;
   element: UIElement;
   spec: Spec;
   registry: ComponentRegistry;
   loading?: boolean;
   fallback?: Component;
+  registerElementInstance?: (
+    elementKey: string,
+    instance: ComponentPublicInstance | VNode | Element | null,
+  ) => void;
 }
 
 const ElementRenderer = defineComponent({
   name: "JsonRenderElement",
   props: {
+    elementKey: {
+      type: String,
+      required: true,
+    },
     element: {
       type: Object as PropType<UIElement>,
       required: true,
@@ -209,6 +220,15 @@ const ElementRenderer = defineComponent({
     },
     fallback: {
       type: Object as PropType<Component>,
+      default: undefined,
+    },
+    registerElementInstance: {
+      type: Function as PropType<
+        (
+          elementKey: string,
+          instance: ComponentPublicInstance | VNode | Element | null,
+        ) => void
+      >,
       default: undefined,
     },
   },
@@ -359,6 +379,7 @@ const ElementRenderer = defineComponent({
             registry: props.registry,
             loading: props.loading,
             fallback: props.fallback,
+            registerElementInstance: props.registerElementInstance,
           })
         : (resolvedElement.children
             ?.map((childKey) => {
@@ -373,11 +394,13 @@ const ElementRenderer = defineComponent({
               }
               return h(ElementRenderer, {
                 key: childKey,
+                elementKey: childKey,
                 element: childElement,
                 spec: props.spec,
                 registry: props.registry,
                 loading: props.loading,
                 fallback: props.fallback,
+                registerElementInstance: props.registerElementInstance,
               });
             })
             .filter((n): n is VNode => n !== null) ?? undefined);
@@ -390,7 +413,18 @@ const ElementRenderer = defineComponent({
             h(
               Component,
               {
+                ref: (
+                  instance: ComponentPublicInstance | VNode | Element | null,
+                ) => {
+                  props.registerElementInstance?.(props.elementKey, instance);
+                },
+                // Keep compatibility with existing component contracts
                 element: resolvedElement,
+                // Keep a nested `props` object for SFCs that expect `defineProps({ props: ... })`
+                props: resolvedElement.props,
+                // Align SFC behavior with defineRegistry function components:
+                // expose resolved element props as top-level component props.
+                ...(resolvedElement.props as Record<string, unknown>),
                 emit: emitEvent,
                 on: onEvent,
                 bindings: elementBindings,
@@ -431,6 +465,15 @@ const RepeatChildren = defineComponent({
       type: Object as PropType<Component>,
       default: undefined,
     },
+    registerElementInstance: {
+      type: Function as PropType<
+        (
+          elementKey: string,
+          instance: ComponentPublicInstance | VNode | Element | null,
+        ) => void
+      >,
+      default: undefined,
+    },
   },
   setup(props) {
     const { state } = useStateStore();
@@ -468,11 +511,13 @@ const RepeatChildren = defineComponent({
                   }
                   return h(ElementRenderer, {
                     key: childKey,
+                    elementKey: childKey,
                     element: childElement,
                     spec: props.spec,
                     registry: props.registry,
                     loading: props.loading,
                     fallback: props.fallback,
+                    registerElementInstance: props.registerElementInstance,
                   });
                 })
                 .filter((n): n is VNode => n !== null) ?? null,
@@ -490,6 +535,18 @@ const RepeatChildren = defineComponent({
 /**
  * Main renderer component
  */
+export interface RendererExposed {
+  callRendererEvent: (
+    elementKey: string,
+    methodName: string,
+    ...args: unknown[]
+  ) => unknown;
+  getElementExposed: (
+    elementKey: string,
+  ) => Record<string, unknown> | undefined;
+  hasElement: (elementKey: string) => boolean;
+}
+
 export const Renderer = defineComponent({
   name: "JsonRenderer",
   props: {
@@ -510,7 +567,80 @@ export const Renderer = defineComponent({
       default: undefined,
     },
   },
-  setup(props) {
+  setup(props, { expose }) {
+    const elementInstances = new Map<
+      string,
+      ComponentPublicInstance | VNode | Element
+    >();
+
+    const registerElementInstance = (
+      elementKey: string,
+      instance: ComponentPublicInstance | VNode | Element | null,
+    ): void => {
+      if (!instance) {
+        elementInstances.delete(elementKey);
+        return;
+      }
+      elementInstances.set(elementKey, instance);
+    };
+
+    const getElementExposed = (
+      elementKey: string,
+    ): Record<string, unknown> | undefined => {
+      const instance = elementInstances.get(elementKey);
+      if (!instance) return undefined;
+
+      // Case 1: Component public instance
+      if ("$" in instance) {
+        const exposed = instance.$.exposed;
+        if (exposed && typeof exposed === "object") {
+          return exposed as Record<string, unknown>;
+        }
+      }
+
+      // Case 2: VNode ref value
+      if (isVNode(instance)) {
+        const exposed = instance.component?.exposed;
+        if (exposed && typeof exposed === "object") {
+          return exposed as Record<string, unknown>;
+        }
+      }
+
+      // Case 3: native element or unsupported ref target
+      return undefined;
+    };
+
+    const callRendererEvent = (
+      elementKey: string,
+      methodName: string,
+      ...args: unknown[]
+    ): unknown => {
+      const exposed = getElementExposed(elementKey);
+      if (!exposed) {
+        console.warn(
+          `[json-render] Element "${elementKey}" has no exposed API.`,
+        );
+        return undefined;
+      }
+      const method = exposed[methodName];
+      if (typeof method !== "function") {
+        console.warn(
+          `[json-render] Exposed method "${methodName}" not found on element "${elementKey}".`,
+        );
+        return undefined;
+      }
+      return (method as (...fnArgs: unknown[]) => unknown)(...args);
+    };
+
+    const hasElement = (elementKey: string): boolean =>
+      elementInstances.has(elementKey);
+
+    expose({
+      callRendererEvent,
+      getElementExposed,
+      hasElement,
+    } satisfies RendererExposed);
+
     return () => {
       if (!props.spec?.root) return null;
 
@@ -518,11 +648,13 @@ export const Renderer = defineComponent({
       if (!rootElement) return null;
 
       return h(ElementRenderer, {
+        elementKey: props.spec.root,
         element: rootElement,
         spec: props.spec,
         registry: props.registry,
         loading: props.loading,
         fallback: props.fallback,
+        registerElementInstance,
       });
     };
   },
@@ -690,7 +822,7 @@ export interface DefineRegistryResult {
 }
 
 type DefineRegistryOptions<C extends Catalog> = {
-  components?: Components<C>;
+  components?: Components<C> | Record<string, Component>;
 } & (CatalogHasActions<C> extends true
   ? { actions: Actions<C> }
   : { actions?: Actions<C> });
@@ -736,43 +868,53 @@ export function defineRegistry<C extends Catalog>(
   const registry: ComponentRegistry = {};
 
   if (options.components) {
-    for (const [name, componentFn] of Object.entries(options.components)) {
-      registry[name] = defineComponent({
-        name: `JsonRenderRegistry_${name}`,
-        props: {
-          element: {
-            type: Object as PropType<UIElement>,
-            required: true,
+    for (const [name, componentEntry] of Object.entries(options.components)) {
+      if (
+        typeof componentEntry === "function" &&
+        !("props" in componentEntry)
+      ) {
+        const componentFn = componentEntry as DefineRegistryComponentFn;
+        registry[name] = defineComponent({
+          name: `JsonRenderRegistry_${name}`,
+          props: {
+            element: {
+              type: Object as PropType<UIElement>,
+              required: true,
+            },
+            emit: {
+              type: Function as PropType<
+                (event: string, params?: Record<string, unknown>) => void
+              >,
+              required: true,
+            },
+            on: {
+              type: Function as PropType<(event: string) => EventHandle>,
+              required: true,
+            },
+            bindings: {
+              type: Object as PropType<Record<string, string>>,
+              default: undefined,
+            },
+            loading: {
+              type: Boolean,
+              default: undefined,
+            },
           },
-          emit: {
-            type: Function as PropType<(event: string) => void>,
-            required: true,
+          setup(registryProps, { slots }) {
+            return () =>
+              componentFn({
+                props: registryProps.element.props,
+                children: slots.default?.(),
+                emit: registryProps.emit,
+                on: registryProps.on,
+                bindings: registryProps.bindings,
+                loading: registryProps.loading,
+              });
           },
-          on: {
-            type: Function as PropType<(event: string) => EventHandle>,
-            required: true,
-          },
-          bindings: {
-            type: Object as PropType<Record<string, string>>,
-            default: undefined,
-          },
-          loading: {
-            type: Boolean,
-            default: undefined,
-          },
-        },
-        setup(registryProps, { slots }) {
-          return () =>
-            (componentFn as DefineRegistryComponentFn)({
-              props: registryProps.element.props,
-              children: slots.default?.(),
-              emit: registryProps.emit,
-              on: registryProps.on,
-              bindings: registryProps.bindings,
-              loading: registryProps.loading,
-            });
-        },
-      });
+        });
+      } else {
+        registry[name] = componentEntry as Component;
+      }
     }
   }
 
