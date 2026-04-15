@@ -57,8 +57,8 @@ import {
 export interface ComponentRenderProps<P = Record<string, unknown>> {
   /** The element being rendered */
   element: UIElement<string, P>;
-  /** Emit a named event */
-  emit: (event: string) => void;
+  /** Emit a named event (optionally with runtime params) */
+  emit: (event: string, params?: Record<string, unknown>) => void;
   /** Get an event handle with metadata */
   on: (event: string) => EventHandle;
   /**
@@ -234,12 +234,22 @@ const ElementRenderer = defineComponent({
     });
 
     // Create emit function
-    const emitEvent = async (eventName: string): Promise<void> => {
+    const emitEvent = async (
+      eventName: string,
+      params?: Record<string, unknown>,
+    ): Promise<void> => {
       const binding = props.element.on?.[eventName];
       if (!binding) return;
       const actionBindings = Array.isArray(binding) ? binding : [binding];
+      const mergedBindings =
+        params && Object.keys(params).length > 0
+          ? actionBindings.map((b) => ({
+              ...b,
+              params: { ...(b.params ?? {}), ...params },
+            }))
+          : actionBindings;
       await resolveAndExecuteBindings(
-        actionBindings,
+        mergedBindings,
         fullCtx.value,
         getSnapshot,
         execute,
@@ -250,13 +260,17 @@ const ElementRenderer = defineComponent({
     const onEvent = (eventName: string): EventHandle => {
       const binding = props.element.on?.[eventName];
       if (!binding) {
-        return { emit: () => {}, shouldPreventDefault: false, bound: false };
+        return {
+          emit: (_params?: Record<string, unknown>) => {},
+          shouldPreventDefault: false,
+          bound: false,
+        };
       }
       const actionBindings = Array.isArray(binding) ? binding : [binding];
       const shouldPreventDefault = actionBindings.some((b) => b.preventDefault);
       return {
-        emit: () => {
-          void emitEvent(eventName);
+        emit: (params?: Record<string, unknown>) => {
+          void emitEvent(eventName, params);
         },
         shouldPreventDefault,
         bound: true,
@@ -684,7 +698,7 @@ type DefineRegistryOptions<C extends Catalog> = {
 type DefineRegistryComponentFn = (ctx: {
   props: unknown;
   children?: VNode | VNode[];
-  emit: (event: string) => void;
+  emit: (event: string, params?: Record<string, unknown>) => void;
   on: (event: string) => EventHandle;
   bindings?: Record<string, string>;
   loading?: boolean;

@@ -37,8 +37,11 @@ export type SetState = (
  * ```
  */
 export interface EventHandle {
-  /** Fire the event (resolve action bindings) */
-  emit: () => void;
+  /**
+   * Fire the event (resolve action bindings).
+   * Optional params are merged into action params before execution.
+   */
+  emit: (params?: Record<string, unknown>) => void;
   /** Whether any binding requested preventDefault */
   shouldPreventDefault: boolean;
   /** Whether any handler is bound to this event */
