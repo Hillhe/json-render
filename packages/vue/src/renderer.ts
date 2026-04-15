@@ -22,6 +22,8 @@ import type {
   ComputedFunction,
   SchemaDefinition,
   StateStore,
+  InferCatalogComponents,
+  InferComponentProps,
 } from "@json-render/core";
 import {
   resolveElementProps,
@@ -418,13 +420,10 @@ const ElementRenderer = defineComponent({
                 ) => {
                   props.registerElementInstance?.(props.elementKey, instance);
                 },
-                // Keep compatibility with existing component contracts
-                element: resolvedElement,
-                // Keep a nested `props` object for SFCs that expect `defineProps({ props: ... })`
-                props: resolvedElement.props,
-                // Align SFC behavior with defineRegistry function components:
-                // expose resolved element props as top-level component props.
                 ...(resolvedElement.props as Record<string, unknown>),
+                // Backward compatibility for SFCs that read nested `props`
+                // via `defineProps({ props: ... })`.
+                props: resolvedElement.props,
                 emit: emitEvent,
                 on: onEvent,
                 bindings: elementBindings,
@@ -827,14 +826,21 @@ type DefineRegistryOptions<C extends Catalog> = {
   ? { actions: Actions<C> }
   : { actions?: Actions<C> });
 
-type DefineRegistryComponentFn = (ctx: {
-  props: unknown;
+type DefineRegistryComponentCtx<P> = {
+  props: P;
   children?: VNode | VNode[];
   emit: (event: string, params?: Record<string, unknown>) => void;
   on: (event: string) => EventHandle;
   bindings?: Record<string, string>;
   loading?: boolean;
-}) => VNode | VNode[] | null | string;
+};
+
+type DefineRegistryComponentFn<
+  C extends Catalog,
+  K extends keyof InferCatalogComponents<C>,
+> = (
+  ctx: DefineRegistryComponentCtx<InferComponentProps<C, K>>,
+) => VNode | VNode[] | null | string;
 
 type DefineRegistryActionFn = (
   params: Record<string, unknown> | undefined,
@@ -868,12 +874,20 @@ export function defineRegistry<C extends Catalog>(
   const registry: ComponentRegistry = {};
 
   if (options.components) {
-    for (const [name, componentEntry] of Object.entries(options.components)) {
+    type ComponentKey = keyof InferCatalogComponents<C>;
+
+    for (const [name, componentEntry] of Object.entries(
+      options.components,
+    ) as Array<[string, Components<C>[ComponentKey] | Component]>) {
       if (
         typeof componentEntry === "function" &&
         !("props" in componentEntry)
       ) {
-        const componentFn = componentEntry as DefineRegistryComponentFn;
+        const componentFn =
+          componentEntry as unknown as DefineRegistryComponentFn<
+            C,
+            ComponentKey
+          >;
         registry[name] = defineComponent({
           name: `JsonRenderRegistry_${name}`,
           props: {
@@ -903,7 +917,10 @@ export function defineRegistry<C extends Catalog>(
           setup(registryProps, { slots }) {
             return () =>
               componentFn({
-                props: registryProps.element.props,
+                props: registryProps.element.props as InferComponentProps<
+                  C,
+                  ComponentKey
+                >,
                 children: slots.default?.(),
                 emit: registryProps.emit,
                 on: registryProps.on,
